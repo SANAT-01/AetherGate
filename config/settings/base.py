@@ -97,3 +97,4 @@ LOGGING = {
 REDIS_URL = env("REDIS_URL", default="redis://localhost:6379/0")
 FREELLMAPI_BASE_URL = env("FREELLMAPI_BASE_URL", default="https://llmapi.sanattudu.tech")
 FREELLMAPI_TOKEN = env("FREELLMAPI_TOKEN", default="")
+IP_RATE_LIMIT_PER_MINUTE = env.int("IP_RATE_LIMIT_PER_MINUTE", default=300)

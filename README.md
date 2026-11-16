@@ -6,6 +6,100 @@ A lightweight, self-hosted, OpenAI-compatible LLM proxy gateway built for SaaS s
 
 Python 3.12, Django 5.x + Django Ninja (async proxy views), PostgreSQL 16 + pgvector (semantic cache), Redis (budgets/rate limiting), httpx (upstream LLM calls), Celery (post-request telemetry, M4+).
 
+## High-level design
+
+### Components
+
+```mermaid
+flowchart TB
+    Client["Client App<br/>(any OpenAI SDK / curl / Postman)"]
+
+    subgraph gw["AetherGate (Django + Ninja, async)"]
+        Router["POST /v1/chat/completions<br/>apps/gateway/api.py"]
+        Auth["Auth + tenant resolution<br/>apps/gateway/auth.py"]
+        RateLimit["Rate limiter (Lua)<br/>apps/gateway/rate_limit.py"]
+        Budget["Budget check + spend record (Lua)<br/>apps/gateway/budget.py"]
+        Provider["Provider adapter<br/>apps/routing/providers/*"]
+        Cache["Semantic cache lookup<br/>(pgvector) — planned M5"]
+        Admin["Django Admin<br/>/admin/ — manual tenant & key provisioning"]
+    end
+
+    Postgres[("PostgreSQL + pgvector<br/>Organization, GatewayAPIKey,<br/>EndCustomerBudget, RequestLog,<br/>ModelPricing, SemanticCacheEntry")]
+    Redis[("Redis<br/>ratelimit:* counters<br/>tenant:*:daily_spend_usd")]
+    LLM["Upstream LLM provider<br/>FreeLLMAPI today —<br/>OpenAI/Anthropic/Gemini planned M3"]
+    Celery["Celery worker<br/>async telemetry — planned M4"]
+
+    Client -->|"Bearer key + X-Tenant-ID"| Router
+    Router --> Auth
+    Auth <-->|lookup key / tenant| Postgres
+    Router --> RateLimit
+    RateLimit <-->|INCR + EXPIRE| Redis
+    Router --> Budget
+    Budget <-->|GET / INCRBYFLOAT| Redis
+    Router -.->|cache hit?| Cache
+    Cache <-.->|cosine search| Postgres
+    Router --> Provider
+    Provider -->|HTTPS| LLM
+    Router -->|write RequestLog| Postgres
+    Router -.->|planned: offload logging| Celery
+    Celery -.-> Postgres
+    Admin <-->|CRUD| Postgres
+
+    style Cache stroke-dasharray: 5 5
+    style Celery stroke-dasharray: 5 5
+    style LLM stroke-dasharray: 2 2
+```
+
+### Request flow — `POST /v1/chat/completions`
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as Gateway (api.py)
+    participant PG as Postgres
+    participant R as Redis
+    participant P as FreeLLMAPI
+
+    C->>G: POST /v1/chat/completions<br/>Bearer key, X-Tenant-ID
+    G->>R: check_ip_rate_limit (Lua: INCR + EXPIRE, keyed on client IP)
+    alt over IP limit (no org known yet, no log written)
+        G-->>C: 429 rate_limit_exceeded
+    end
+    G->>PG: resolve_api_key(raw_key)
+    alt invalid/missing key
+        G-->>C: 401 invalid_api_key
+    end
+    G->>PG: resolve_end_customer(org, tenant_id)
+    alt unknown/blocked tenant
+        PG-->>G: not found
+        G->>PG: write RequestLog(FAILED)
+        G-->>C: 403 unknown_tenant
+    end
+    G->>R: check_rate_limit (Lua: INCR + EXPIRE, keyed on api_key.id)
+    alt over limit
+        G->>PG: write RequestLog(FAILED)
+        G-->>C: 429 rate_limit_exceeded
+    end
+    G->>R: check_budget (Lua: GET vs daily_limit_usd)
+    alt over budget
+        G->>PG: write RequestLog(BUDGET_EXCEEDED)
+        G-->>C: 429 budget_exceeded
+    end
+    G->>P: complete(model, messages)
+    alt upstream error/timeout
+        P-->>G: 429/5xx or timeout
+        G->>PG: write RequestLog(FAILED)
+        G-->>C: 502 upstream_error
+    end
+    P-->>G: response + usage (tokens)
+    G->>PG: lookup ModelPricing(model_served)
+    G->>R: record_spend (Lua: INCRBYFLOAT, EXPIREAT midnight UTC)
+    G->>PG: write RequestLog(SUCCESS, cost_usd)
+    G-->>C: 200 OpenAI-shaped response
+```
+
+**Legend:** dashed boxes/edges = planned, not yet implemented (semantic cache → M5, multi-provider fallback → M3, Celery-offloaded telemetry → M4). Everything else above is shipped (M1 + M2).
+
 ## Local setup
 
 ```bash
@@ -33,6 +127,11 @@ Or seed a demo org/key/tenant automatically:
 docker compose run --rm web python scripts/seed_demo_data.py
 ```
 
+### Inspecting the data stores
+
+- **pgAdmin** (Postgres UI): `docker compose up -d pgadmin` → `http://localhost:5050`
+- **RedisInsight** (Redis UI): `docker compose up -d redisinsight` → `http://localhost:5540`. Useful for inspecting live budget (`tenant:*:daily_spend_usd`) and rate-limit (`ratelimit:*`) keys.
+
 ## Tests, lint, types
 
 ```bash
@@ -49,4 +148,8 @@ A `Makefile` wraps all of the above plus `make up` / `make down` / `make migrate
 
 **M1 shipped**: single-provider (FreeLLMAPI) non-streaming passthrough with auth, manual tenant-check, and request logging.
 
-Planned next: M2 budget + rate-limit enforcement → M3 multi-provider fallback → M4 streaming + Celery telemetry → M5 semantic cache → M6 dashboard polish (custom Django admin views, no separate frontend).
+**M2 shipped**: atomic Redis-backed daily budget enforcement and per-API-key rate limiting, both pre-flight (before any upstream call).
+
+**M2.5 shipped**: pre-auth, IP-based rate limiting — a second, independent limiter (`IP_RATE_LIMIT_PER_MINUTE`, default 300/min) that runs before the Postgres auth lookup, protecting the server from unauthenticated/invalid-key request floods. The per-API-key limiter from M2 still runs separately afterward for authenticated abuse.
+
+Planned next: M3 multi-provider fallback → M4 streaming + Celery telemetry → M5 semantic cache → M6 dashboard polish (custom Django admin views, no separate frontend).

@@ -20,6 +20,7 @@ class GatewayAPIKey(models.Model):
     key_prefix = models.CharField(max_length=12, db_index=True)
     key_hash = models.CharField(max_length=128, unique=True)
     is_active = models.BooleanField(default=True)
+    rate_limit_per_minute = models.PositiveIntegerField(default=60)
     routing_policy = models.ForeignKey(
         "routing.RoutingPolicy",
         null=True,

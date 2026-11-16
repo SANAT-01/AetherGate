@@ -11,7 +11,9 @@ from apps.routing.providers.base import LLMMessage
 from apps.routing.providers.freellmapi import FreeLLMAPIProvider
 
 from .auth import resolve_api_key, resolve_end_customer
+from .budget import check_budget, record_spend
 from .models import RequestLog
+from .rate_limit import check_ip_rate_limit, check_rate_limit
 from .schemas import (
     ChatCompletionChoice,
     ChatCompletionRequest,
@@ -28,10 +30,28 @@ def _openai_error(message: str, err_type: str, code: str) -> dict:
 
 @router.post(
     "/chat/completions",
-    response={200: ChatCompletionResponse, 400: dict, 401: dict, 403: dict, 502: dict},
+    response={
+        200: ChatCompletionResponse,
+        400: dict,
+        401: dict,
+        403: dict,
+        429: dict,
+        502: dict,
+    },
 )
 async def chat_completions(request: HttpRequest, payload: ChatCompletionRequest):
     start = time.monotonic()
+
+    # --- Step 0: Pre-auth IP rate limit ---
+    # Protects the server itself from unauthenticated/invalid-key request
+    # floods, independent of the per-key limiter in Step 3 (which only
+    # applies once a valid key is known). No RequestLog row is written here
+    # since no org is known yet at this point.
+    client_ip = request.META.get("REMOTE_ADDR", "unknown")
+    if not await check_ip_rate_limit(client_ip):
+        return 429, _openai_error(
+            "Too many requests from this client", "rate_limit_error", "rate_limit_exceeded"
+        )
 
     # --- Step 1: Auth & org resolution ---
     auth_header = request.headers.get("Authorization", "")
@@ -70,10 +90,32 @@ async def chat_completions(request: HttpRequest, payload: ChatCompletionRequest)
             "unknown_tenant",
         )
 
-    # --- Step 3: Budget / rate-limit enforcement ---
-    # Deliberate no-op in M1. M2 inserts here: a Redis Lua atomic budget check
-    # keyed on (org, external_tenant_id) against `budget.daily_limit_usd`, plus
-    # a per-GatewayAPIKey Redis token-bucket rate limiter keyed on `api_key.id`.
+    # --- Step 3: Rate limit + budget enforcement ---
+    if not await check_rate_limit(api_key):
+        await RequestLog.objects.acreate(
+            org=org,
+            external_tenant_id=external_tenant_id,
+            api_key=api_key,
+            model_requested=payload.model,
+            status=RequestLog.Status.FAILED,
+            latency_ms=int((time.monotonic() - start) * 1000),
+        )
+        return 429, _openai_error(
+            "Rate limit exceeded for this API key", "rate_limit_error", "rate_limit_exceeded"
+        )
+
+    if not await check_budget(budget):
+        await RequestLog.objects.acreate(
+            org=org,
+            external_tenant_id=external_tenant_id,
+            api_key=api_key,
+            model_requested=payload.model,
+            status=RequestLog.Status.BUDGET_EXCEEDED,
+            latency_ms=int((time.monotonic() - start) * 1000),
+        )
+        return 429, _openai_error(
+            "Daily budget exceeded for this tenant", "insufficient_quota", "budget_exceeded"
+        )
 
     if payload.stream:
         return 400, _openai_error(
@@ -124,7 +166,10 @@ async def chat_completions(request: HttpRequest, payload: ChatCompletionRequest)
             Decimal(result.completion_tokens) / 1_000_000
         ) * pricing.output_cost_per_1m_tokens
 
-    # --- Step 6: Log + respond ---
+    # --- Step 6: Record spend, log + respond ---
+    if cost_usd is not None:
+        await record_spend(org.id, external_tenant_id, cost_usd)
+
     await RequestLog.objects.acreate(
         org=org,
         external_tenant_id=external_tenant_id,

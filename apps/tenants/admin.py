@@ -14,10 +14,25 @@ class OrganizationAdmin(admin.ModelAdmin):
 
 @admin.register(GatewayAPIKey)
 class GatewayAPIKeyAdmin(admin.ModelAdmin):
-    list_display = ("org", "name", "key_prefix", "is_active", "created_at")
+    list_display = (
+        "org",
+        "name",
+        "key_prefix",
+        "is_active",
+        "rate_limit_per_minute",
+        "created_at",
+    )
     list_filter = ("org", "is_active")
     readonly_fields = ("key_prefix", "key_hash")
-    fields = ("org", "name", "is_active", "routing_policy", "key_prefix", "key_hash")
+    fields = (
+        "org",
+        "name",
+        "is_active",
+        "rate_limit_per_minute",
+        "routing_policy",
+        "key_prefix",
+        "key_hash",
+    )
 
     def save_model(self, request, obj, form, change):
         if not change:
