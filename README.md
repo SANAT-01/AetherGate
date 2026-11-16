@@ -26,7 +26,7 @@ flowchart TB
 
     Postgres[("PostgreSQL + pgvector<br/>Organization, GatewayAPIKey,<br/>EndCustomerBudget, RequestLog,<br/>ModelPricing, SemanticCacheEntry")]
     Redis[("Redis<br/>ratelimit:* counters<br/>tenant:*:daily_spend_usd")]
-    LLM["Upstream LLM provider<br/>FreeLLMAPI today —<br/>OpenAI/Anthropic/Gemini planned M3"]
+    LLM["Upstream LLM providers<br/>FreeLLMAPI + OpenAI,<br/>fallback chain via RoutingPolicy"]
     Celery["Celery worker<br/>async telemetry — planned M4"]
 
     Client -->|"Bearer key + X-Tenant-ID"| Router
@@ -47,7 +47,6 @@ flowchart TB
 
     style Cache stroke-dasharray: 5 5
     style Celery stroke-dasharray: 5 5
-    style LLM stroke-dasharray: 2 2
 ```
 
 ### Request flow — `POST /v1/chat/completions`
@@ -85,20 +84,31 @@ sequenceDiagram
         G->>PG: write RequestLog(BUDGET_EXCEEDED)
         G-->>C: 429 budget_exceeded
     end
-    G->>P: complete(model, messages)
-    alt upstream error/timeout
-        P-->>G: 429/5xx or timeout
+    G->>PG: load RoutingPolicy.rules_json (or default single-item chain)
+    loop for each provider in fallback chain
+        G->>P: complete(model, messages)
+        alt success
+            P-->>G: response + usage (tokens)
+        else 429/5xx/timeout (transient)
+            P-->>G: error
+            Note over G: advance to next provider in chain
+        else other error
+            P-->>G: error
+            G->>PG: write RequestLog(FAILED)
+            G-->>C: 502 upstream_error (no fallback)
+        end
+    end
+    alt chain exhausted
         G->>PG: write RequestLog(FAILED)
         G-->>C: 502 upstream_error
     end
-    P-->>G: response + usage (tokens)
     G->>PG: lookup ModelPricing(model_served)
     G->>R: record_spend (Lua: INCRBYFLOAT, EXPIREAT midnight UTC)
-    G->>PG: write RequestLog(SUCCESS, cost_usd)
+    G->>PG: write RequestLog(SUCCESS or FALLBACK_SUCCESS, cost_usd)
     G-->>C: 200 OpenAI-shaped response
 ```
 
-**Legend:** dashed boxes/edges = planned, not yet implemented (semantic cache → M5, multi-provider fallback → M3, Celery-offloaded telemetry → M4). Everything else above is shipped (M1 + M2).
+**Legend:** dashed boxes/edges = planned, not yet implemented (semantic cache → M5, Celery-offloaded telemetry → M4). Everything else above is shipped (M1 + M2 + M2.5 + M3).
 
 ## Local setup
 
@@ -152,4 +162,6 @@ A `Makefile` wraps all of the above plus `make up` / `make down` / `make migrate
 
 **M2.5 shipped**: pre-auth, IP-based rate limiting — a second, independent limiter (`IP_RATE_LIMIT_PER_MINUTE`, default 300/min) that runs before the Postgres auth lookup, protecting the server from unauthenticated/invalid-key request floods. The per-API-key limiter from M2 still runs separately afterward for authenticated abuse.
 
-Planned next: M3 multi-provider fallback → M4 streaming + Celery telemetry → M5 semantic cache → M6 dashboard polish (custom Django admin views, no separate frontend).
+**M3 shipped**: multi-provider fallback. `RoutingPolicy.rules_json` defines a per-org fallback chain (up to 3 attempts: primary + 2 fallbacks); on a transient upstream failure (429/5xx/timeout) the gateway advances to the next provider automatically. `ProviderCredential.encrypted_api_key` is now real (Fernet-encrypted, admin-managed), and a second provider (`OpenAIProvider`) proves the mechanism end-to-end. Orgs with no `RoutingPolicy` configured see unchanged M1/M2 behavior — a single provider attempt.
+
+Planned next: M4 streaming + Celery telemetry → M5 semantic cache → M6 dashboard polish (custom Django admin views, no separate frontend).

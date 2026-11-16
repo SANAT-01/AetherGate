@@ -10,7 +10,7 @@ def hash_api_key(raw_key: str) -> str:
 async def resolve_api_key(raw_key: str) -> GatewayAPIKey | None:
     key_hash = hash_api_key(raw_key)
     return (
-        await GatewayAPIKey.objects.select_related("org")
+        await GatewayAPIKey.objects.select_related("org", "routing_policy")
         .filter(
             key_hash=key_hash,
             is_active=True,

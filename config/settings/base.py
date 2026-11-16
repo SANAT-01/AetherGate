@@ -98,3 +98,7 @@ REDIS_URL = env("REDIS_URL", default="redis://localhost:6379/0")
 FREELLMAPI_BASE_URL = env("FREELLMAPI_BASE_URL", default="https://llmapi.sanattudu.tech")
 FREELLMAPI_TOKEN = env("FREELLMAPI_TOKEN", default="")
 IP_RATE_LIMIT_PER_MINUTE = env.int("IP_RATE_LIMIT_PER_MINUTE", default=300)
+# Fernet key used to encrypt ProviderCredential.encrypted_api_key at rest.
+# Generate one with:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+FIELD_ENCRYPTION_KEY = env("FIELD_ENCRYPTION_KEY")

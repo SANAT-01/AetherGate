@@ -6,9 +6,9 @@ import httpx
 from django.http import HttpRequest
 from ninja import Router
 
+from apps.routing.engine import execute_with_fallback
 from apps.routing.models import ModelPricing
 from apps.routing.providers.base import LLMMessage
-from apps.routing.providers.freellmapi import FreeLLMAPIProvider
 
 from .auth import resolve_api_key, resolve_end_customer
 from .budget import check_budget, record_spend
@@ -124,35 +124,39 @@ async def chat_completions(request: HttpRequest, payload: ChatCompletionRequest)
             "streaming_unsupported",
         )
 
-    # --- Step 4: Call provider ---
-    provider = FreeLLMAPIProvider()
+    # --- Step 4: Call provider (with fallback chain per the org's RoutingPolicy) ---
     messages = [LLMMessage(role=m.role, content=m.content) for m in payload.messages]
     try:
-        result = await provider.complete(model=payload.model, messages=messages, timeout=30.0)
+        result, provider_served, fallback_triggered = await execute_with_fallback(
+            org=org,
+            routing_policy=api_key.routing_policy,
+            messages=messages,
+            requested_model=payload.model,
+        )
     except httpx.HTTPStatusError as exc:
         await RequestLog.objects.acreate(
             org=org,
             external_tenant_id=external_tenant_id,
             api_key=api_key,
             model_requested=payload.model,
-            provider_served=provider.provider_name,
             status=RequestLog.Status.FAILED,
             latency_ms=int((time.monotonic() - start) * 1000),
         )
         return 502, _openai_error(
             f"Upstream provider error: {exc.response.status_code}", "api_error", "upstream_error"
         )
-    except httpx.TimeoutException:
+    except httpx.TransportError:
         await RequestLog.objects.acreate(
             org=org,
             external_tenant_id=external_tenant_id,
             api_key=api_key,
             model_requested=payload.model,
-            provider_served=provider.provider_name,
             status=RequestLog.Status.FAILED,
             latency_ms=int((time.monotonic() - start) * 1000),
         )
-        return 502, _openai_error("Upstream provider timed out", "api_error", "upstream_timeout")
+        return 502, _openai_error(
+            "Upstream provider unreachable or timed out", "api_error", "upstream_timeout"
+        )
 
     latency_ms = int((time.monotonic() - start) * 1000)
 
@@ -176,8 +180,10 @@ async def chat_completions(request: HttpRequest, payload: ChatCompletionRequest)
         api_key=api_key,
         model_requested=payload.model,
         model_served=result.model_served,
-        provider_served=provider.provider_name,
-        status=RequestLog.Status.SUCCESS,
+        provider_served=provider_served,
+        status=RequestLog.Status.FALLBACK_SUCCESS
+        if fallback_triggered
+        else RequestLog.Status.SUCCESS,
         prompt_tokens=result.prompt_tokens,
         completion_tokens=result.completion_tokens,
         cost_usd=cost_usd,

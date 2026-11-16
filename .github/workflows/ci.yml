@@ -41,6 +41,7 @@ jobs:
       REDIS_URL: redis://localhost:6379/0
       FREELLMAPI_BASE_URL: https://example.invalid
       FREELLMAPI_TOKEN: ci-dummy-token
+      FIELD_ENCRYPTION_KEY: anapnPIS0kXQl3oX-v5TdGAMb9UVYpuC7CiSMxUxsyc=
 
     steps:
       - uses: actions/checkout@v4
