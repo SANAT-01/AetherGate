@@ -102,3 +102,14 @@ IP_RATE_LIMIT_PER_MINUTE = env.int("IP_RATE_LIMIT_PER_MINUTE", default=300)
 # Generate one with:
 #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 FIELD_ENCRYPTION_KEY = env("FIELD_ENCRYPTION_KEY")
+
+# --- Celery: offloads RequestLog telemetry writes off the hot request path ---
+CELERY_BROKER_URL = REDIS_URL
+CELERY_RESULT_BACKEND = None
+# Fire-and-forget telemetry tasks; nobody polls a result.
+CELERY_TASK_IGNORE_RESULT = True
+CELERY_TASK_SERIALIZER = "json"
+CELERY_ACCEPT_CONTENT = ["json"]
+# Forces .delay()/.apply_async() to run synchronously, in-process — used by tests
+# so a RequestLog assertion right after a request doesn't race a real worker.
+CELERY_TASK_ALWAYS_EAGER = env.bool("CELERY_TASK_ALWAYS_EAGER", default=False)

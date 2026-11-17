@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from decimal import Decimal
 
 import httpx
+from asgiref.sync import sync_to_async
 from django.http import HttpRequest, StreamingHttpResponse
 from ninja import Router
 
@@ -24,12 +25,20 @@ from .schemas import (
     ChatCompletionResponse,
     ChatMessageSchema,
 )
+from .tasks import record_request_telemetry
 
 router = Router()
 
 
 def _openai_error(message: str, err_type: str, code: str) -> dict:
     return {"error": {"message": message, "type": err_type, "code": code}}
+
+
+# .delay() normally just does a fast, synchronous Redis enqueue — but under
+# CELERY_TASK_ALWAYS_EAGER (tests) it runs the task body (a synchronous ORM
+# write) inline. Either way, that's synchronous work that must not run
+# directly on the event loop thread inside this async view.
+_enqueue_telemetry = sync_to_async(record_request_telemetry.delay)
 
 
 @router.post(
@@ -79,10 +88,10 @@ async def chat_completions(request: HttpRequest, payload: ChatCompletionRequest)
 
     budget = await resolve_end_customer(org, external_tenant_id)
     if budget is None:
-        await RequestLog.objects.acreate(
-            org=org,
+        await _enqueue_telemetry(
+            org_id=org.id,
             external_tenant_id=external_tenant_id,
-            api_key=api_key,
+            api_key_id=api_key.id,
             model_requested=payload.model,
             status=RequestLog.Status.FAILED,
             latency_ms=int((time.monotonic() - start) * 1000),
@@ -96,10 +105,10 @@ async def chat_completions(request: HttpRequest, payload: ChatCompletionRequest)
 
     # --- Step 3: Rate limit + budget enforcement ---
     if not await check_rate_limit(api_key):
-        await RequestLog.objects.acreate(
-            org=org,
+        await _enqueue_telemetry(
+            org_id=org.id,
             external_tenant_id=external_tenant_id,
-            api_key=api_key,
+            api_key_id=api_key.id,
             model_requested=payload.model,
             status=RequestLog.Status.FAILED,
             latency_ms=int((time.monotonic() - start) * 1000),
@@ -109,10 +118,10 @@ async def chat_completions(request: HttpRequest, payload: ChatCompletionRequest)
         )
 
     if not await check_budget(budget):
-        await RequestLog.objects.acreate(
-            org=org,
+        await _enqueue_telemetry(
+            org_id=org.id,
             external_tenant_id=external_tenant_id,
-            api_key=api_key,
+            api_key_id=api_key.id,
             model_requested=payload.model,
             status=RequestLog.Status.BUDGET_EXCEEDED,
             latency_ms=int((time.monotonic() - start) * 1000),
@@ -133,10 +142,10 @@ async def chat_completions(request: HttpRequest, payload: ChatCompletionRequest)
                 requested_model=payload.model,
             )
         except httpx.HTTPStatusError as exc:
-            await RequestLog.objects.acreate(
-                org=org,
+            await _enqueue_telemetry(
+                org_id=org.id,
                 external_tenant_id=external_tenant_id,
-                api_key=api_key,
+                api_key_id=api_key.id,
                 model_requested=payload.model,
                 status=RequestLog.Status.FAILED,
                 latency_ms=int((time.monotonic() - start) * 1000),
@@ -147,10 +156,10 @@ async def chat_completions(request: HttpRequest, payload: ChatCompletionRequest)
                 "upstream_error",
             )
         except httpx.TransportError:
-            await RequestLog.objects.acreate(
-                org=org,
+            await _enqueue_telemetry(
+                org_id=org.id,
                 external_tenant_id=external_tenant_id,
-                api_key=api_key,
+                api_key_id=api_key.id,
                 model_requested=payload.model,
                 status=RequestLog.Status.FAILED,
                 latency_ms=int((time.monotonic() - start) * 1000),
@@ -181,10 +190,10 @@ async def chat_completions(request: HttpRequest, payload: ChatCompletionRequest)
             requested_model=payload.model,
         )
     except httpx.HTTPStatusError as exc:
-        await RequestLog.objects.acreate(
-            org=org,
+        await _enqueue_telemetry(
+            org_id=org.id,
             external_tenant_id=external_tenant_id,
-            api_key=api_key,
+            api_key_id=api_key.id,
             model_requested=payload.model,
             status=RequestLog.Status.FAILED,
             latency_ms=int((time.monotonic() - start) * 1000),
@@ -193,10 +202,10 @@ async def chat_completions(request: HttpRequest, payload: ChatCompletionRequest)
             f"Upstream provider error: {exc.response.status_code}", "api_error", "upstream_error"
         )
     except httpx.TransportError:
-        await RequestLog.objects.acreate(
-            org=org,
+        await _enqueue_telemetry(
+            org_id=org.id,
             external_tenant_id=external_tenant_id,
-            api_key=api_key,
+            api_key_id=api_key.id,
             model_requested=payload.model,
             status=RequestLog.Status.FAILED,
             latency_ms=int((time.monotonic() - start) * 1000),
@@ -221,10 +230,10 @@ async def chat_completions(request: HttpRequest, payload: ChatCompletionRequest)
     if cost_usd is not None:
         await record_spend(org.id, external_tenant_id, cost_usd)
 
-    await RequestLog.objects.acreate(
-        org=org,
+    await _enqueue_telemetry(
+        org_id=org.id,
         external_tenant_id=external_tenant_id,
-        api_key=api_key,
+        api_key_id=api_key.id,
         model_requested=payload.model,
         model_served=result.model_served,
         provider_served=provider_served,
@@ -233,7 +242,7 @@ async def chat_completions(request: HttpRequest, payload: ChatCompletionRequest)
         else RequestLog.Status.SUCCESS,
         prompt_tokens=result.prompt_tokens,
         completion_tokens=result.completion_tokens,
-        cost_usd=cost_usd,
+        cost_usd=str(cost_usd) if cost_usd is not None else None,
         latency_ms=latency_ms,
     )
 
@@ -293,10 +302,10 @@ async def _sse_response_generator(
             )
             yield f"data: {event.model_dump_json()}\n\n".encode()
     except (httpx.HTTPStatusError, httpx.TransportError, ValueError, KeyError, IndexError):
-        await RequestLog.objects.acreate(
-            org=org,
+        await _enqueue_telemetry(
+            org_id=org.id,
             external_tenant_id=external_tenant_id,
-            api_key=api_key,
+            api_key_id=api_key.id,
             model_requested=model_requested,
             model_served=model_served,
             provider_served=provider_served,
@@ -315,10 +324,10 @@ async def _sse_response_generator(
     if cost_usd is not None:
         await record_spend(org.id, external_tenant_id, cost_usd)
 
-    await RequestLog.objects.acreate(
-        org=org,
+    await _enqueue_telemetry(
+        org_id=org.id,
         external_tenant_id=external_tenant_id,
-        api_key=api_key,
+        api_key_id=api_key.id,
         model_requested=model_requested,
         model_served=model_served,
         provider_served=provider_served,
@@ -327,7 +336,7 @@ async def _sse_response_generator(
         else RequestLog.Status.SUCCESS,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
-        cost_usd=cost_usd,
+        cost_usd=str(cost_usd) if cost_usd is not None else None,
         latency_ms=int((time.monotonic() - start) * 1000),
     )
 

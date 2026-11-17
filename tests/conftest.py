@@ -1,6 +1,16 @@
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _celery_eager(settings):
+    # Makes .delay()/.apply_async() run synchronously, in-process, so a
+    # RequestLog assertion right after a request doesn't race a real worker.
+    # Must be set on django.conf.settings (not celery_app.conf directly):
+    # Celery's config view resolves CELERY_-prefixed Django settings ahead of
+    # values set directly on celery_app.conf, so only this takes effect.
+    settings.CELERY_TASK_ALWAYS_EAGER = True
+
+
 @pytest.fixture
 def client():
     from django.test import AsyncClient
