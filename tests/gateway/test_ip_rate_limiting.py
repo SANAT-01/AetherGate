@@ -35,7 +35,7 @@ async def test_valid_key_still_works_under_the_ip_limit(client, settings):
     await sync_to_async(create_budget)(org, "acme-corp")
 
     with respx.mock(assert_all_called=False) as mock:
-        mock.post("https://llmapi.sanattudu.tech/v1/chat/completions").mock(
+        mock.post(f"{settings.FREELLMAPI_BASE_URL}/v1/chat/completions").mock(
             return_value=httpx.Response(500, json={"error": "boom"})
         )
         resp = await client.post(

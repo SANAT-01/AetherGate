@@ -2,6 +2,7 @@ import httpx
 import pytest
 import respx
 from asgiref.sync import sync_to_async
+from django.conf import settings
 
 from apps.gateway.models import RequestLog
 from tests.factories import (
@@ -12,7 +13,7 @@ from tests.factories import (
     create_routing_policy,
 )
 
-FREELLMAPI_URL = "https://llmapi.sanattudu.tech/v1/chat/completions"
+FREELLMAPI_URL = f"{settings.FREELLMAPI_BASE_URL}/v1/chat/completions"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
 create_org_async = sync_to_async(create_org)

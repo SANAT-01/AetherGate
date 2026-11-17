@@ -39,7 +39,7 @@ jobs:
       DJANGO_DEBUG: "1"
       DATABASE_URL: postgres://aethergate:aethergate@localhost:5432/aethergate
       REDIS_URL: redis://localhost:6379/0
-      FREELLMAPI_BASE_URL: https://example.invalid
+      FREELLMAPI_BASE_URL: "https://llmapi.sanattudu.tech"
       FREELLMAPI_TOKEN: ci-dummy-token
       FIELD_ENCRYPTION_KEY: anapnPIS0kXQl3oX-v5TdGAMb9UVYpuC7CiSMxUxsyc=
 

@@ -2,10 +2,11 @@ import httpx
 import pytest
 import respx
 from asgiref.sync import sync_to_async
+from django.conf import settings
 
 from tests.factories import create_api_key, create_budget, create_org
 
-FREELLMAPI_URL = "https://llmapi.sanattudu.tech/v1/chat/completions"
+FREELLMAPI_URL = f"{settings.FREELLMAPI_BASE_URL}/v1/chat/completions"
 
 create_org_async = sync_to_async(create_org)
 create_api_key_async = sync_to_async(create_api_key)
