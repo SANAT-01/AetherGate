@@ -1,6 +1,7 @@
 import hashlib
 import secrets
 
+from apps.gateway.models import RequestLog
 from apps.routing.crypto import encrypt_api_key
 from apps.routing.models import ProviderCredential, RoutingPolicy
 from apps.tenants.models import EndCustomerBudget, GatewayAPIKey, Organization
@@ -56,6 +57,32 @@ def create_provider_credential(
         base_url=base_url,
         is_active=True,
     )
+
+
+def create_request_log(
+    org: Organization,
+    external_tenant_id: str = "acme-corp",
+    status: str = RequestLog.Status.SUCCESS,
+    cost_usd: float | None = None,
+    saved_usd: float | None = None,
+    latency_ms: int | None = None,
+    created_at=None,
+) -> RequestLog:
+    log = RequestLog.objects.create(
+        org=org,
+        external_tenant_id=external_tenant_id,
+        model_requested="auto",
+        model_served="qwen/qwen3.8-27b",
+        provider_served="freellmapi",
+        status=status,
+        cost_usd=cost_usd,
+        saved_usd=saved_usd,
+        latency_ms=latency_ms,
+    )
+    if created_at is not None:
+        RequestLog.objects.filter(pk=log.pk).update(created_at=created_at)
+        log.refresh_from_db()
+    return log
 
 
 def create_budget(

@@ -21,6 +21,7 @@ INSTALLED_APPS = [
     "apps.tenants",
     "apps.routing",
     "apps.gateway",
+    "apps.analytics",
 ]
 
 MIDDLEWARE = [

@@ -4,10 +4,12 @@ from django.contrib.staticfiles.urls import staticfiles_urlpatterns
 from django.urls import URLPattern, URLResolver, path
 from ninja import NinjaAPI
 
+from apps.analytics.api import router as analytics_router
 from apps.gateway.api import router as gateway_router
 
 api = NinjaAPI(title="AetherGate API", version="1.0.0")
 api.add_router("", gateway_router)
+api.add_router("/analytics", analytics_router)
 
 urlpatterns: list[URLPattern | URLResolver] = [
     path("admin/", admin.site.urls),

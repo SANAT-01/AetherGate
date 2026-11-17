@@ -1,0 +1,59 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<div id="content-main">
+    <form method="get" style="margin-bottom: 1.5em;">
+        <label for="org">Organization:</label>
+        <select name="org" id="org" onchange="this.form.submit()">
+            {% for org in orgs %}
+                <option value="{{ org.id }}" {% if selected_org and org.id == selected_org.id %}selected{% endif %}>
+                    {{ org.name }}
+                </option>
+            {% endfor %}
+        </select>
+        <label for="days">Window (days):</label>
+        <select name="days" id="days" onchange="this.form.submit()">
+            <option value="1" {% if days == 1 %}selected{% endif %}>1</option>
+            <option value="7" {% if days == 7 %}selected{% endif %}>7</option>
+            <option value="30" {% if days == 30 %}selected{% endif %}>30</option>
+            <option value="90" {% if days == 90 %}selected{% endif %}>90</option>
+        </select>
+    </form>
+
+    {% if not selected_org %}
+        <p>No organizations exist yet.</p>
+    {% else %}
+        <h2>Spend ({{ days }}d) — total ${{ spend.total_cost_usd }}</h2>
+        <table>
+            <thead><tr><th>Tenant</th><th>Cost (USD)</th></tr></thead>
+            <tbody>
+                {% for row in spend.by_tenant %}
+                <tr><td>{{ row.external_tenant_id }}</td><td>{{ row.cost_usd|default:"0" }}</td></tr>
+                {% empty %}
+                <tr><td colspan="2">No spend recorded in this window.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        <h2>Cache savings ({{ days }}d)</h2>
+        <table>
+            <tbody>
+                <tr><td>Total requests</td><td>{{ cache_savings.total_requests }}</td></tr>
+                <tr><td>Cache hits</td><td>{{ cache_savings.cache_hit_count }}</td></tr>
+                <tr><td>Hit rate</td><td>{{ cache_savings.cache_hit_rate|floatformat:2 }}</td></tr>
+                <tr><td>Total saved (USD)</td><td>${{ cache_savings.total_saved_usd }}</td></tr>
+            </tbody>
+        </table>
+
+        <h2>Latency ({{ days }}d)</h2>
+        <table>
+            <tbody>
+                <tr><td>Samples</td><td>{{ latency.sample_count }}</td></tr>
+                <tr><td>p50</td><td>{{ latency.p50_ms|default:"—" }} ms</td></tr>
+                <tr><td>p95</td><td>{{ latency.p95_ms|default:"—" }} ms</td></tr>
+                <tr><td>p99</td><td>{{ latency.p99_ms|default:"—" }} ms</td></tr>
+            </tbody>
+        </table>
+    {% endif %}
+</div>
+{% endblock %}
