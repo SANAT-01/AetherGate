@@ -26,6 +26,24 @@ class ChatCompletionResponse(BaseModel):
     usage: dict
 
 
+class ChatCompletionChunkDelta(BaseModel):
+    role: str | None = None
+    content: str | None = None
+
+
+class ChatCompletionChunkChoice(BaseModel):
+    index: int = 0
+    delta: ChatCompletionChunkDelta
+    finish_reason: str | None = None
+
+
+class ChatCompletionChunk(BaseModel):
+    id: str
+    object: str = "chat.completion.chunk"
+    model: str
+    choices: list[ChatCompletionChunkChoice]
+
+
 class ErrorDetail(BaseModel):
     message: str
     type: str

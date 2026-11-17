@@ -1,14 +1,15 @@
 import time
 import uuid
+from collections.abc import AsyncIterator
 from decimal import Decimal
 
 import httpx
-from django.http import HttpRequest
+from django.http import HttpRequest, StreamingHttpResponse
 from ninja import Router
 
-from apps.routing.engine import execute_with_fallback
+from apps.routing.engine import execute_stream_with_fallback, execute_with_fallback
 from apps.routing.models import ModelPricing
-from apps.routing.providers.base import LLMMessage
+from apps.routing.providers.base import LLMMessage, LLMStreamChunk
 
 from .auth import resolve_api_key, resolve_end_customer
 from .budget import check_budget, record_spend
@@ -16,6 +17,9 @@ from .models import RequestLog
 from .rate_limit import check_ip_rate_limit, check_rate_limit
 from .schemas import (
     ChatCompletionChoice,
+    ChatCompletionChunk,
+    ChatCompletionChunkChoice,
+    ChatCompletionChunkDelta,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatMessageSchema,
@@ -117,15 +121,58 @@ async def chat_completions(request: HttpRequest, payload: ChatCompletionRequest)
             "Daily budget exceeded for this tenant", "insufficient_quota", "budget_exceeded"
         )
 
-    if payload.stream:
-        return 400, _openai_error(
-            "Streaming is not supported in this deployment yet",
-            "invalid_request_error",
-            "streaming_unsupported",
-        )
-
     # --- Step 4: Call provider (with fallback chain per the org's RoutingPolicy) ---
     messages = [LLMMessage(role=m.role, content=m.content) for m in payload.messages]
+
+    if payload.stream:
+        try:
+            stream_iter, provider_served, fallback_triggered = await execute_stream_with_fallback(
+                org=org,
+                routing_policy=api_key.routing_policy,
+                messages=messages,
+                requested_model=payload.model,
+            )
+        except httpx.HTTPStatusError as exc:
+            await RequestLog.objects.acreate(
+                org=org,
+                external_tenant_id=external_tenant_id,
+                api_key=api_key,
+                model_requested=payload.model,
+                status=RequestLog.Status.FAILED,
+                latency_ms=int((time.monotonic() - start) * 1000),
+            )
+            return 502, _openai_error(
+                f"Upstream provider error: {exc.response.status_code}",
+                "api_error",
+                "upstream_error",
+            )
+        except httpx.TransportError:
+            await RequestLog.objects.acreate(
+                org=org,
+                external_tenant_id=external_tenant_id,
+                api_key=api_key,
+                model_requested=payload.model,
+                status=RequestLog.Status.FAILED,
+                latency_ms=int((time.monotonic() - start) * 1000),
+            )
+            return 502, _openai_error(
+                "Upstream provider unreachable or timed out", "api_error", "upstream_timeout"
+            )
+
+        return StreamingHttpResponse(
+            _sse_response_generator(
+                stream_iter,
+                org=org,
+                external_tenant_id=external_tenant_id,
+                api_key=api_key,
+                model_requested=payload.model,
+                provider_served=provider_served,
+                fallback_triggered=fallback_triggered,
+                start=start,
+            ),
+            content_type="text/event-stream",
+        )
+
     try:
         result, provider_served, fallback_triggered = await execute_with_fallback(
             org=org,
@@ -205,3 +252,69 @@ async def chat_completions(request: HttpRequest, payload: ChatCompletionRequest)
             "total_tokens": result.total_tokens,
         },
     )
+
+
+async def _sse_response_generator(
+    stream_iter: AsyncIterator[LLMStreamChunk],
+    *,
+    org,
+    external_tenant_id: str,
+    api_key,
+    model_requested: str,
+    provider_served: str,
+    fallback_triggered: bool,
+    start: float,
+) -> AsyncIterator[bytes]:
+    response_id = f"chatcmpl-{uuid.uuid4().hex}"
+    model_served = model_requested
+    first = True
+
+    try:
+        async for chunk in stream_iter:
+            if chunk.model_served:
+                model_served = chunk.model_served
+            delta = (
+                ChatCompletionChunkDelta(role="assistant", content=chunk.content)
+                if first
+                else ChatCompletionChunkDelta(content=chunk.content)
+            )
+            first = False
+            event = ChatCompletionChunk(
+                id=response_id,
+                model=model_served,
+                choices=[ChatCompletionChunkChoice(delta=delta)],
+            )
+            yield f"data: {event.model_dump_json()}\n\n".encode()
+    except (httpx.HTTPStatusError, httpx.TransportError):
+        await RequestLog.objects.acreate(
+            org=org,
+            external_tenant_id=external_tenant_id,
+            api_key=api_key,
+            model_requested=model_requested,
+            model_served=model_served,
+            provider_served=provider_served,
+            status=RequestLog.Status.FAILED,
+            latency_ms=int((time.monotonic() - start) * 1000),
+        )
+        return
+
+    await RequestLog.objects.acreate(
+        org=org,
+        external_tenant_id=external_tenant_id,
+        api_key=api_key,
+        model_requested=model_requested,
+        model_served=model_served,
+        provider_served=provider_served,
+        status=RequestLog.Status.FALLBACK_SUCCESS
+        if fallback_triggered
+        else RequestLog.Status.SUCCESS,
+        latency_ms=int((time.monotonic() - start) * 1000),
+    )
+
+    closing_event = ChatCompletionChunk(
+        id=response_id,
+        model=model_served,
+        choices=[ChatCompletionChunkChoice(delta=ChatCompletionChunkDelta(), finish_reason="stop")],
+    )
+    yield f"data: {closing_event.model_dump_json()}\n\n".encode()
+    yield b"data: [DONE]\n\n"

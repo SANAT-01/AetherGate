@@ -137,6 +137,34 @@ async def test_non_transient_error_fails_fast_without_fallback(client):
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_chain_entry_with_no_model_defers_to_requested_model(client):
+    org = await create_org_async()
+    policy = await create_routing_policy_async(
+        org,
+        chain=[{"provider": "freellmapi", "model": None}],
+    )
+    _, raw_key = await create_api_key_async(org, routing_policy=policy)
+    await create_budget_async(org, "acme-corp")
+
+    with respx.mock(assert_all_called=True) as mock:
+        route = mock.post(FREELLMAPI_URL).mock(return_value=_success_response("mistral-code-fim"))
+
+        resp = await client.post(
+            "/v1/chat/completions",
+            data={
+                "model": "mistral-code-fim",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            content_type="application/json",
+            headers={"Authorization": f"Bearer {raw_key}", "X-Tenant-ID": "acme-corp"},
+        )
+
+    assert resp.status_code == 200
+    sent_body = route.calls.last.request.content
+    assert b'"model": "mistral-code-fim"' in sent_body
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_no_routing_policy_uses_single_provider_as_before(client):
     org = await create_org_async()
     _, raw_key = await create_api_key_async(org)

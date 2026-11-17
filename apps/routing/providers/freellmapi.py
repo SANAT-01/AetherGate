@@ -1,9 +1,10 @@
+import json
 from collections.abc import AsyncIterator
 
 import httpx
 from django.conf import settings
 
-from .base import BaseLLMProvider, LLMCompletionResult, LLMMessage
+from .base import BaseLLMProvider, LLMCompletionResult, LLMMessage, LLMStreamChunk
 
 
 class FreeLLMAPIProvider(BaseLLMProvider):
@@ -49,5 +50,28 @@ class FreeLLMAPIProvider(BaseLLMProvider):
         model: str,
         messages: list[LLMMessage],
         timeout: float = 30.0,
-    ) -> AsyncIterator[str]:
-        raise NotImplementedError("Streaming is deferred to M4")
+    ) -> AsyncIterator[LLMStreamChunk]:
+        payload = {
+            "model": model,
+            "messages": [m.model_dump() for m in messages],
+            "stream": True,
+        }
+        headers = {"Authorization": f"Bearer {self.token}"}
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "POST", f"{self.base_url}/v1/chat/completions", json=payload, headers=headers
+            ) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data = line.removeprefix("data: ").strip()
+                    if data == "[DONE]":
+                        break
+                    chunk = json.loads(data)
+                    delta = chunk["choices"][0].get("delta", {})
+                    content = delta.get("content")
+                    if content:
+                        yield LLMStreamChunk(
+                            content=content, model_served=chunk.get("model", model)
+                        )

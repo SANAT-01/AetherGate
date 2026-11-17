@@ -133,18 +133,3 @@ async def test_upstream_timeout_returns_502_and_logs_failed(client):
     assert resp.status_code == 502
     log = await RequestLog.objects.alast()
     assert log.status == RequestLog.Status.FAILED
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_stream_true_returns_400_not_implemented(client):
-    org = await create_org_async()
-    _, raw_key = await create_api_key_async(org)
-    await create_budget_async(org, "acme-corp")
-
-    resp = await client.post(
-        "/v1/chat/completions",
-        data={"model": "auto", "messages": [{"role": "user", "content": "hi"}], "stream": True},
-        content_type="application/json",
-        headers={"Authorization": f"Bearer {raw_key}", "X-Tenant-ID": "acme-corp"},
-    )
-    assert resp.status_code == 400

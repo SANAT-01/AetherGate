@@ -18,6 +18,11 @@ class LLMCompletionResult(BaseModel):
     raw_response: dict
 
 
+class LLMStreamChunk(BaseModel):
+    content: str
+    model_served: str | None = None
+
+
 class BaseLLMProvider(ABC):
     provider_name: str
 
@@ -31,12 +36,10 @@ class BaseLLMProvider(ABC):
     ) -> LLMCompletionResult: ...
 
     @abstractmethod
-    async def stream(
+    def stream(
         self,
         *,
         model: str,
         messages: list[LLMMessage],
         timeout: float = 30.0,
-    ) -> AsyncIterator[str]:
-        """Streaming is deferred to M4; concrete providers may raise NotImplementedError."""
-        ...
+    ) -> AsyncIterator[LLMStreamChunk]: ...

@@ -164,4 +164,6 @@ A `Makefile` wraps all of the above plus `make up` / `make down` / `make migrate
 
 **M3 shipped**: multi-provider fallback. `RoutingPolicy.rules_json` defines a per-org fallback chain (up to 3 attempts: primary + 2 fallbacks); on a transient upstream failure (429/5xx/timeout) the gateway advances to the next provider automatically. `ProviderCredential.encrypted_api_key` is now real (Fernet-encrypted, admin-managed), and a second provider (`OpenAIProvider`) proves the mechanism end-to-end. Orgs with no `RoutingPolicy` configured see unchanged M1/M2 behavior — a single provider attempt.
 
-Planned next: M4 streaming + Celery telemetry → M5 semantic cache → M6 dashboard polish (custom Django admin views, no separate frontend).
+**M4 streaming shipped** (Celery-offloaded telemetry still pending): `stream=True` requests are served as real Server-Sent Events end-to-end. The same fallback chain from M3 applies, but only up to the first streamed chunk — once a provider starts sending content the HTTP status is committed, so a later disconnect just ends the response early rather than retrying. `RequestLog` is still written inline (not yet offloaded to Celery), and token/cost accounting is not collected for streamed responses in this phase (`prompt_tokens`/`completion_tokens`/`cost_usd` stay `None`).
+
+Planned next: M4 Celery-offloaded telemetry → M5 semantic cache → M6 dashboard polish (custom Django admin views, no separate frontend).

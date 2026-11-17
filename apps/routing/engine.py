@@ -1,10 +1,12 @@
+from collections.abc import AsyncIterator
+
 import httpx
 
 from apps.tenants.models import Organization
 
 from .crypto import decrypt_api_key
 from .models import ProviderCredential, RoutingPolicy
-from .providers.base import BaseLLMProvider, LLMCompletionResult, LLMMessage
+from .providers.base import BaseLLMProvider, LLMCompletionResult, LLMMessage, LLMStreamChunk
 from .providers.freellmapi import FreeLLMAPIProvider
 from .providers.openai import OpenAIProvider
 from .schemas import RoutingChainAttempt, RoutingRules
@@ -71,7 +73,7 @@ async def execute_with_fallback(
         provider = await _build_provider(org, attempt.provider)
         try:
             result = await provider.complete(
-                model=attempt.model, messages=messages, timeout=attempt.timeout
+                model=attempt.model or requested_model, messages=messages, timeout=attempt.timeout
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code not in _TRANSIENT_STATUS_CODES:
@@ -83,6 +85,60 @@ async def execute_with_fallback(
             continue
         else:
             return result, provider.provider_name, index > 0
+
+    assert last_exc is not None
+    raise last_exc
+
+
+async def _empty_stream() -> AsyncIterator[LLMStreamChunk]:
+    return
+    yield  # pragma: no cover - makes this an async generator
+
+
+async def _prepend(
+    first: LLMStreamChunk, rest: AsyncIterator[LLMStreamChunk]
+) -> AsyncIterator[LLMStreamChunk]:
+    yield first
+    async for chunk in rest:
+        yield chunk
+
+
+async def execute_stream_with_fallback(
+    *,
+    org: Organization,
+    routing_policy: RoutingPolicy | None,
+    messages: list[LLMMessage],
+    requested_model: str,
+) -> tuple[AsyncIterator[LLMStreamChunk], str, bool]:
+    """Streaming counterpart to execute_with_fallback.
+
+    Fallback only happens before the first chunk is yielded by a given
+    provider's stream() — once content has started flowing to the client
+    the HTTP status is already committed, so a mid-stream failure just ends
+    the response early instead of retrying the next chain entry.
+    """
+    chain = _build_chain(routing_policy, requested_model)
+
+    last_exc: Exception | None = None
+    for index, attempt in enumerate(chain):
+        provider = await _build_provider(org, attempt.provider)
+        gen = provider.stream(
+            model=attempt.model or requested_model, messages=messages, timeout=attempt.timeout
+        )
+        try:
+            first_chunk = await gen.__anext__()
+        except StopAsyncIteration:
+            return _empty_stream(), provider.provider_name, index > 0
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in _TRANSIENT_STATUS_CODES:
+                raise
+            last_exc = exc
+            continue
+        except httpx.TransportError as exc:
+            last_exc = exc
+            continue
+        else:
+            return _prepend(first_chunk, gen), provider.provider_name, index > 0
 
     assert last_exc is not None
     raise last_exc
