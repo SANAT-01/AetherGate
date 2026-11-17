@@ -18,9 +18,16 @@ class LLMCompletionResult(BaseModel):
     raw_response: dict
 
 
+class LLMStreamUsage(BaseModel):
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+
+
 class LLMStreamChunk(BaseModel):
     content: str
     model_served: str | None = None
+    usage: LLMStreamUsage | None = None
 
 
 class BaseLLMProvider(ABC):

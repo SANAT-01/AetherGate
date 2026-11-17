@@ -5,6 +5,7 @@ from asgiref.sync import sync_to_async
 from django.conf import settings
 
 from apps.gateway.models import RequestLog
+from apps.routing.models import ModelPricing
 from tests.factories import (
     create_api_key,
     create_budget,
@@ -21,6 +22,14 @@ create_api_key_async = sync_to_async(create_api_key)
 create_budget_async = sync_to_async(create_budget)
 create_routing_policy_async = sync_to_async(create_routing_policy)
 create_provider_credential_async = sync_to_async(create_provider_credential)
+create_pricing_async = sync_to_async(
+    lambda model_name: ModelPricing.objects.create(
+        model_name=model_name,
+        provider="freellmapi",
+        input_cost_per_1m_tokens=1000,
+        output_cost_per_1m_tokens=1000,
+    )
+)
 
 
 def _sse_body(model: str) -> bytes:
@@ -88,6 +97,58 @@ async def test_successful_stream_returns_sse(client):
     log = await RequestLog.objects.alast()
     assert log.status == RequestLog.Status.SUCCESS
     assert log.provider_served == "freellmapi"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_stream_with_trailing_usage_chunk_records_tokens_and_cost(client):
+    """Regression test for a real FreeLLMAPI capture: the stream ends with a
+    finish_reason="stop" chunk (empty delta, non-empty choices) followed by a
+    chunk with an EMPTY choices array that carries a top-level "usage" object.
+    This previously crashed with IndexError on chunk["choices"][0].
+    """
+    org = await create_org_async()
+    _, raw_key = await create_api_key_async(org)
+    await create_budget_async(org, "acme-corp")
+    await create_pricing_async("mistral-code-fim-latest")
+
+    body = (
+        b'data: {"model": "mistral-code-fim-latest", '
+        b'"choices": [{"delta": {"content": "Hi"}, "finish_reason": null}]}\n\n'
+        b'data: {"model": "mistral-code-fim-latest", '
+        b'"choices": [{"delta": {}, "finish_reason": "stop"}]}\n\n'
+        b'data: {"model": "mistral-code-fim-latest", "choices": [], '
+        b'"usage": {"prompt_tokens": 9, "completion_tokens": 45, "total_tokens": 54}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(FREELLMAPI_URL).mock(
+            return_value=httpx.Response(
+                200, content=body, headers={"content-type": "text/event-stream"}
+            )
+        )
+
+        resp = await client.post(
+            "/v1/chat/completions",
+            data={
+                "model": "mistral-code-fim-latest",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+            content_type="application/json",
+            headers={"Authorization": f"Bearer {raw_key}", "X-Tenant-ID": "acme-corp"},
+        )
+        response_body = b"".join([chunk async for chunk in resp.streaming_content])
+
+    assert resp.status_code == 200
+    assert b"Hi" in response_body
+    assert response_body.rstrip().endswith(b"data: [DONE]")
+
+    log = await RequestLog.objects.alast()
+    assert log.status == RequestLog.Status.SUCCESS
+    assert log.prompt_tokens == 9
+    assert log.completion_tokens == 45
+    assert float(log.cost_usd) == pytest.approx(0.054)
 
 
 @pytest.mark.django_db(transaction=True)

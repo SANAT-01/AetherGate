@@ -268,11 +268,18 @@ async def _sse_response_generator(
     response_id = f"chatcmpl-{uuid.uuid4().hex}"
     model_served = model_requested
     first = True
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
 
     try:
         async for chunk in stream_iter:
             if chunk.model_served:
                 model_served = chunk.model_served
+            if chunk.usage:
+                prompt_tokens = chunk.usage.prompt_tokens
+                completion_tokens = chunk.usage.completion_tokens
+            if not chunk.content:
+                continue
             delta = (
                 ChatCompletionChunkDelta(role="assistant", content=chunk.content)
                 if first
@@ -285,7 +292,7 @@ async def _sse_response_generator(
                 choices=[ChatCompletionChunkChoice(delta=delta)],
             )
             yield f"data: {event.model_dump_json()}\n\n".encode()
-    except (httpx.HTTPStatusError, httpx.TransportError):
+    except (httpx.HTTPStatusError, httpx.TransportError, ValueError, KeyError, IndexError):
         await RequestLog.objects.acreate(
             org=org,
             external_tenant_id=external_tenant_id,
@@ -298,6 +305,16 @@ async def _sse_response_generator(
         )
         return
 
+    pricing = await ModelPricing.objects.filter(model_name=model_served).afirst()
+    cost_usd = None
+    if pricing and prompt_tokens is not None and completion_tokens is not None:
+        cost_usd = (Decimal(prompt_tokens) / 1_000_000) * pricing.input_cost_per_1m_tokens + (
+            Decimal(completion_tokens) / 1_000_000
+        ) * pricing.output_cost_per_1m_tokens
+
+    if cost_usd is not None:
+        await record_spend(org.id, external_tenant_id, cost_usd)
+
     await RequestLog.objects.acreate(
         org=org,
         external_tenant_id=external_tenant_id,
@@ -308,6 +325,9 @@ async def _sse_response_generator(
         status=RequestLog.Status.FALLBACK_SUCCESS
         if fallback_triggered
         else RequestLog.Status.SUCCESS,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cost_usd=cost_usd,
         latency_ms=int((time.monotonic() - start) * 1000),
     )
 

@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 import httpx
 from django.conf import settings
 
-from .base import BaseLLMProvider, LLMCompletionResult, LLMMessage, LLMStreamChunk
+from .base import BaseLLMProvider, LLMCompletionResult, LLMMessage, LLMStreamChunk, LLMStreamUsage
 
 
 class FreeLLMAPIProvider(BaseLLMProvider):
@@ -69,7 +69,17 @@ class FreeLLMAPIProvider(BaseLLMProvider):
                     if data == "[DONE]":
                         break
                     chunk = json.loads(data)
-                    delta = chunk["choices"][0].get("delta", {})
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        usage = chunk.get("usage")
+                        if usage:
+                            yield LLMStreamChunk(
+                                content="",
+                                model_served=chunk.get("model", model),
+                                usage=LLMStreamUsage(**usage),
+                            )
+                        continue
+                    delta = choices[0].get("delta", {})
                     content = delta.get("content")
                     if content:
                         yield LLMStreamChunk(

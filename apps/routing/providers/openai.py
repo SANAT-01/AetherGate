@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 
-from .base import BaseLLMProvider, LLMCompletionResult, LLMMessage, LLMStreamChunk
+from .base import BaseLLMProvider, LLMCompletionResult, LLMMessage, LLMStreamChunk, LLMStreamUsage
 
 OPENAI_BASE_URL = "https://api.openai.com"
 
@@ -70,7 +70,17 @@ class OpenAIProvider(BaseLLMProvider):
                     if data == "[DONE]":
                         break
                     chunk = json.loads(data)
-                    delta = chunk["choices"][0].get("delta", {})
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        usage = chunk.get("usage")
+                        if usage:
+                            yield LLMStreamChunk(
+                                content="",
+                                model_served=chunk.get("model", model),
+                                usage=LLMStreamUsage(**usage),
+                            )
+                        continue
+                    delta = choices[0].get("delta", {})
                     content = delta.get("content")
                     if content:
                         yield LLMStreamChunk(
